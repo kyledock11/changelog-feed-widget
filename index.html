@@ -10,12 +10,12 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
   body {
-    background: #0d0d0d;
+    background: transparent;
     color: #e8e4df;
     font-family: 'Inter', sans-serif;
     display: flex;
     align-items: flex-start;
-    justify-content: center;
+    justify-content: flex-start;
     min-height: 100vh;
     overflow-y: auto;
     overflow-x: hidden;
@@ -26,7 +26,7 @@
   }
 
   ::-webkit-scrollbar-track {
-    background: #0d0d0d;
+    background: transparent;
   }
 
   ::-webkit-scrollbar-thumb {
@@ -40,13 +40,13 @@
 
   * {
     scrollbar-width: thin;
-    scrollbar-color: #2a2725 #0d0d0d;
+    scrollbar-color: #2a2725 transparent;
   }
 
   .container {
     max-width: 640px;
     width: 100%;
-    padding: 2.5rem 2rem;
+    padding: 0.75rem 0.5rem;
   }
 
   .label {
@@ -94,6 +94,17 @@
     line-height: 1.55;
     color: #ede9e3;
     margin-bottom: 0.45rem;
+  }
+
+  .entry-type {
+    font-family: 'Inter', sans-serif;
+    font-weight: 400;
+    font-size: 0.6rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #5a5650;
+    display: inline-block;
+    margin-right: 0.5rem;
   }
 
   .entry-time {
@@ -172,7 +183,59 @@ function truncate(str, maxLen) {
   return str.slice(0, maxLen).trimEnd() + '…';
 }
 
-async function fetchCommits() {
+function eventToEntry(event) {
+  const repo = stripRepoOwner(event.repo.name);
+  const time = relativeTime(event.created_at);
+
+  switch (event.type) {
+    case 'PushEvent': {
+      if (!event.payload || !event.payload.commits) return null;
+      const commits = event.payload.commits;
+      const last = commits[commits.length - 1];
+      if (!last || !last.message) return null;
+      const count = commits.length;
+      const suffix = count > 1 ? ` (+${count - 1} more)` : '';
+      return { repo, message: truncate(last.message, 120) + suffix, time, type: 'pushed' };
+    }
+    case 'CreateEvent': {
+      const ref = event.payload.ref_type;
+      const name = event.payload.ref;
+      if (ref === 'repository') {
+        return { repo, message: `Created repository`, time, type: 'created' };
+      }
+      return { repo, message: `Created ${ref} ${name || ''}`.trim(), time, type: 'created' };
+    }
+    case 'DeleteEvent': {
+      const ref = event.payload.ref_type;
+      const name = event.payload.ref;
+      return { repo, message: `Deleted ${ref} ${name || ''}`.trim(), time, type: 'deleted' };
+    }
+    case 'ReleaseEvent': {
+      const tag = event.payload.release?.tag_name || '';
+      return { repo, message: `Released ${tag}`, time, type: 'released' };
+    }
+    case 'IssuesEvent': {
+      const action = event.payload.action;
+      const title = truncate(event.payload.issue?.title || '', 100);
+      return { repo, message: `${action} issue: ${title}`, time, type: 'issue' };
+    }
+    case 'PullRequestEvent': {
+      const action = event.payload.action;
+      const title = truncate(event.payload.pull_request?.title || '', 100);
+      return { repo, message: `${action} PR: ${title}`, time, type: 'pr' };
+    }
+    case 'ForkEvent': {
+      return { repo, message: `Forked repository`, time, type: 'forked' };
+    }
+    case 'WatchEvent': {
+      return { repo, message: `Starred repository`, time, type: 'starred' };
+    }
+    default:
+      return null;
+  }
+}
+
+async function fetchActivity() {
   const url = `https://api.github.com/users/${GITHUB_USER}/events/public`;
   const res = await fetch(url, {
     headers: { 'Accept': 'application/vnd.github.v3+json' }
@@ -183,23 +246,9 @@ async function fetchCommits() {
   const entries = [];
 
   for (const event of events) {
-    if (event.type !== 'PushEvent') continue;
-    if (!event.payload || !event.payload.commits) continue;
-
-    const repo = stripRepoOwner(event.repo.name);
-    const createdAt = event.created_at;
-
-    // Take the most recent commit from this push
-    const commits = event.payload.commits;
-    const lastCommit = commits[commits.length - 1];
-    if (!lastCommit || !lastCommit.message) continue;
-
-    entries.push({
-      repo,
-      message: truncate(lastCommit.message, 120),
-      time: relativeTime(createdAt)
-    });
-
+    const entry = eventToEntry(event);
+    if (!entry) continue;
+    entries.push(entry);
     if (entries.length >= MAX_ENTRIES) break;
   }
 
@@ -224,7 +273,7 @@ function renderEntries(entries) {
     el.innerHTML = `
       <div class="entry-repo">${escHtml(entry.repo)}</div>
       <div class="entry-message">${escHtml(entry.message)}</div>
-      <div class="entry-time">${escHtml(entry.time)}</div>
+      <div class="entry-time"><span class="entry-type">${escHtml(entry.type)}</span>${escHtml(entry.time)}</div>
     `;
     feed.appendChild(el);
 
@@ -249,7 +298,7 @@ function escHtml(str) {
 
 async function refresh() {
   try {
-    const entries = await fetchCommits();
+    const entries = await fetchActivity();
     renderEntries(entries);
   } catch (err) {
     const feed = document.getElementById('feed');
